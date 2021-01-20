@@ -1,0 +1,16 @@
+version: '2'
+services:
+  xenon:
+    image: zhyass/xenon-mysql57
+    environment:
+      INIT_TOKUDB: 1
+      MYSQL_REPL_PASSWORD: Repl_123
+    ports:
+      - "3306"
+    volumes:
+      # create volumes for use
+      - /var/lib/mysql
+      - /var/lib/xenon
+      # bind mount my local my.cnf
+      # - $PWD/my.cnf:/etc/my.cnf.d/my.cnf
+
