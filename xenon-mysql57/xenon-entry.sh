@@ -1,16 +1,5 @@
 #!/bin/bash
 
-help()
-{
-	echo $1
-
-	cat << EE
-usage:
-	xenon-entry is command tool for xenon
-	xenon-entry [start] options
-EE
-}
-
 # usage: file_env VAR [DEFAULT]
 #	ie: file_env 'XYZ_DB_PASSWORD' 'example'
 # (will allow for "$XYZ_DB_PASSWORD_FILE" to fill in the value of
@@ -65,93 +54,96 @@ _get_config() {
 ipaddr=$(hostname -I | awk ' { print $1 } ')
 server_id=$(echo $ipaddr | tr . '\n' | awk '{s = s*256 + $1} END{printf("%d", s)}')
 
-init_server(){
-	grep -l "server_id" /etc/mysql/my.cnf
-	if [ $? -ne 0 ];then
-		echo "server_id=$server_id" >> /etc/mysql/my.cnf
+grep -l "server_id" /etc/mysql/my.cnf
+if [ $? -ne 0 ];then
+	echo "server_id=$server_id" >> /etc/mysql/my.cnf
+fi
+
+if [ -n "$INIT_TOKUDB" ]; then
+	export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.1
+fi
+# Get config
+DATADIR="$(_get_config 'datadir')"
+
+if [ ! -d "$DATADIR/mysql" ]; then
+	mkdir -p "$DATADIR"
+
+	echo 'Initializing database'
+	mysqld --initialize-insecure --skip-ssl
+	echo 'Database initialized'
+
+	if command -v mysql_ssl_rsa_setup > /dev/null && [ ! -e "$DATADIR/server-key.pem" ]; then
+		# https://github.com/mysql/mysql-server/blob/23032807537d8dd8ee4ec1c4d40f0633cd4e12f9/packaging/deb-in/extra/mysql-systemd-start#L81-L84
+		echo 'Initializing certificates'
+		mysql_ssl_rsa_setup --datadir="$DATADIR"
+		echo 'Certificates initialized'
 	fi
 
+	SOCKET="$(_get_config 'socket')"
+	"mysqld" --skip-networking --socket="${SOCKET}" &
+	pid="$!"
+
+	mysql=( mysql --protocol=socket -uroot -hlocalhost --socket="${SOCKET}" --password="" )
+
+	for i in {120..0}; do
+		if echo 'SELECT 1' | "${mysql[@]}" &> /dev/null; then
+			break
+		fi
+		echo 'MySQL init process in progress...'
+		sleep 1
+	done
+	if [ "$i" = 0 ]; then
+		echo >&2 'MySQL init process failed.'
+		exit 1
+	fi
+
+	if [ -z "$MYSQL_INITDB_SKIP_TZINFO" ]; then
+		# sed is for https://bugs.mysql.com/bug.php?id=20545
+		mysql_tzinfo_to_sql /usr/share/zoneinfo | sed 's/Local time zone must be set--see zic manual page/FCTY/' | "${mysql[@]}" mysql
+	fi
+
+	# install TokuDB engine
 	if [ -n "$INIT_TOKUDB" ]; then
-		export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libjemalloc.so.1
-	fi
-	# Get config
-	DATADIR="$(_get_config 'datadir')"
-
-	if [ ! -d "$DATADIR/mysql" ]; then
-		mkdir -p "$DATADIR"
-
-		echo 'Initializing database'
-		mysqld --initialize-insecure --skip-ssl
-		echo 'Database initialized'
-
-		if command -v mysql_ssl_rsa_setup > /dev/null && [ ! -e "$DATADIR/server-key.pem" ]; then
-			# https://github.com/mysql/mysql-server/blob/23032807537d8dd8ee4ec1c4d40f0633cd4e12f9/packaging/deb-in/extra/mysql-systemd-start#L81-L84
-			echo 'Initializing certificates'
-			mysql_ssl_rsa_setup --datadir="$DATADIR"
-			echo 'Certificates initialized'
-		fi
-
-		SOCKET="$(_get_config 'socket')"
-		"mysqld" --skip-networking --socket="${SOCKET}" &
-		pid="$!"
-
-		mysql=( mysql --protocol=socket -uroot -hlocalhost --socket="${SOCKET}" --password="" )
-
-		for i in {120..0}; do
-			if echo 'SELECT 1' | "${mysql[@]}" &> /dev/null; then
-				break
-			fi
-			echo 'MySQL init process in progress...'
-			sleep 1
-		done
-		if [ "$i" = 0 ]; then
-			echo >&2 'MySQL init process failed.'
-			exit 1
-		fi
-
-		if [ -z "$MYSQL_INITDB_SKIP_TZINFO" ]; then
-			# sed is for https://bugs.mysql.com/bug.php?id=20545
-			mysql_tzinfo_to_sql /usr/share/zoneinfo | sed 's/Local time zone must be set--see zic manual page/FCTY/' | "${mysql[@]}" mysql
-		fi
-
-		# install TokuDB engine
-		if [ -n "$INIT_TOKUDB" ]; then
-			ps-admin --docker --enable-tokudb -u root
-		fi
-
-		"${mysql[@]}" <<-EOSQL
-			-- What's done in this file shouldn't be replicated
-			-- or products like mysql-fabric won't work
-			SET @@SESSION.SQL_LOG_BIN=0;
-			DELETE FROM mysql.user WHERE user NOT IN ('mysql.sys', 'root') OR host NOT IN ('localhost') ;
-			CREATE USER 'root'@'127.0.0.1' IDENTIFIED BY '' ;
-			GRANT ALL ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION ;
-			DROP DATABASE IF EXISTS test ;
-			FLUSH PRIVILEGES ;
-		EOSQL
-
-		file_env 'MYSQL_REPL_PASSWORD' 'Repl_123'
-		echo "GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* to 'qc_repl'@'%' IDENTIFIED BY '$MYSQL_REPL_PASSWORD' ;" | "${mysql[@]}"
-		echo 'FLUSH PRIVILEGES ;' | "${mysql[@]}"
-
-		echo
-		ls /docker-entrypoint-initdb.d/ > /dev/null
-		for f in /docker-entrypoint-initdb.d/*; do
-			process_init_file "$f" "${mysql[@]}"
-		done
-
-		if ! kill -s TERM "$pid" || ! wait "$pid"; then
-			echo >&2 'MySQL init process failed.'
-			exit 1
-		fi
-
-		echo
-		echo 'MySQL init process done.'
-		echo
+		ps-admin --docker --enable-tokudb -u root
 	fi
 
+	"${mysql[@]}" <<-EOSQL
+		-- What's done in this file shouldn't be replicated
+		-- or products like mysql-fabric won't work
+		SET @@SESSION.SQL_LOG_BIN=0;
+		DELETE FROM mysql.user WHERE user NOT IN ('mysql.sys', 'root') OR host NOT IN ('localhost') ;
+		CREATE USER 'root'@'127.0.0.1' IDENTIFIED BY '' ;
+		GRANT ALL ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION ;
+		DROP DATABASE IF EXISTS test ;
+		FLUSH PRIVILEGES ;
+	EOSQL
 
-	printf '{
+	file_env 'MYSQL_REPL_PASSWORD' 'Repl_123'
+	echo "GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* to 'qc_repl'@'%' IDENTIFIED BY '$MYSQL_REPL_PASSWORD' ;" | "${mysql[@]}"
+	echo 'FLUSH PRIVILEGES ;' | "${mysql[@]}"
+
+	echo
+	ls /docker-entrypoint-initdb.d/ > /dev/null
+	for f in /docker-entrypoint-initdb.d/*; do
+		process_init_file "$f" "${mysql[@]}"
+	done
+
+	if ! kill -s TERM "$pid" || ! wait "$pid"; then
+		echo >&2 'MySQL init process failed.'
+		exit 1
+	fi
+
+	rm /var/log/mysql/error.log
+	rm /var/lib/mysql/auto.cnf
+	chown -R mysql:mysql "$DATADIR"
+
+	echo
+	echo 'MySQL init process done.'
+	echo
+fi
+
+
+printf '{
  "log": {
   "level": "INFO"
  },
@@ -200,39 +192,7 @@ init_server(){
   "backup-iops-limits": 100000
  }
 }' $ipaddr $MYSQL_REPL_PASSWORD $ipaddr > /etc/xenon/xenon.json
-}
 
-start_ssh(){
-	# start the ssh server.
-	sudo service ssh start
-}
+chown -R mysql:mysql /etc/xenon/xenon.json
 
-start_mysql(){
-	mysqld_safe --defaults-file=/etc/mysql/my.cnf --server-id=$server_id &
-}
-
-start_xenon(){
-	/xenon/xenon -c /etc/xenon/xenon.json >> /var/log/xenon/xenon.log 2>&1 &
-}
-
-cmd=$1
-shift 1
-
-case $cmd in
-	start)
-		init_server
-		start_mysql
-		start_ssh
-		start_xenon
-		while [ -n "$(pgrep mysqld)" -a -n "$(pgrep sshd)" -a -n "$(pgrep xenon)" ]
-		do
-			sleep 60
-		done
-		;;
-	*)
-		help "unknow command $cmd."
-		exit 1
-		;;
-esac
-
-exit 0
+exec "$@"
