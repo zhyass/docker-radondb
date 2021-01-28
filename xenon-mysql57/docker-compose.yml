@@ -13,4 +13,3 @@ services:
       - /var/lib/xenon
       # bind mount my local my.cnf
       # - $PWD/my.cnf:/etc/my.cnf.d/my.cnf
-

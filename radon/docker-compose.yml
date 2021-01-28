@@ -1,0 +1,9 @@
+version: '2'
+services:
+  radon:
+    image: radon:v1.0
+    ports:
+      - "3306"
+    volumes:
+      # create volumes for use
+      - /var/lib/radon

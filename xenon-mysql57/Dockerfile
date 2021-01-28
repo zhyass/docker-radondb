@@ -1,7 +1,7 @@
 # Builder image
 FROM golang:1.13-buster as builder
 
-# ARG XENON_TAG v1.1.3
+# ARG XENON_TAG=v1.1.3
 RUN set -ex; \
     mkdir -p /go/src/github.com/radondb; \
     cd /go/src/github.com/radondb; \
@@ -14,7 +14,14 @@ RUN set -ex; \
 FROM ubuntu:focal
 
 RUN set -ex; \
-    groupadd -r mysql && useradd -r -g mysql mysql; \
+    groupadd --gid 999 --system mysql; \
+    useradd \
+    --uid 999 \
+    --system \
+    --home-dir /var/lib/mysql \
+    --no-create-home \
+    --gid mysql \
+    mysql; \
     echo 'mysql':'mysql' | chpasswd; \
     apt-get update; \
     if ! which gpg; then \
@@ -48,10 +55,9 @@ RUN set -ex; \
         echo tzdata tzdata/Areas select Asia; \
         echo tzdata tzdata/Zones/Asia select Shanghai; \
     } | debconf-set-selections; \
-    # install "pwgen" for randomizing passwords
     # install "tzdata" for /usr/share/zoneinfo/
     # install "xz-utils" for .sql.xz docker-entrypoint-initdb.d files
-    apt-get install -y --no-install-recommends libjemalloc1 libmecab2 pwgen tzdata xz-utils; \
+    apt-get install -y --no-install-recommends libjemalloc1 libmecab2 tzdata xz-utils; \
     apt-get install -y --no-install-recommends \
         percona-server-server-5.7 \
         percona-server-common-5.7 \
@@ -73,8 +79,8 @@ RUN set -ex; \
 
 VOLUME ["/var/lib/xenon", "/var/log/xenon", "/var/lib/mysql", "/var/log/mysql"]
 
-COPY --from=builder /go/src/github.com/radondb/xenon/bin/xenon /xenon/xenon
-COPY --from=builder /go/src/github.com/radondb/xenon/bin/xenoncli /xenon/xenoncli
+COPY --from=builder --chown=mysql:mysql /go/src/github.com/radondb/xenon/bin/xenon /xenon/xenon
+COPY --from=builder --chown=mysql:mysql /go/src/github.com/radondb/xenon/bin/xenoncli /xenon/xenoncli
 COPY xenon-entry.sh /docker-entrypoint.sh
 COPY --chown=mysql:mysql my.cnf /etc/mysql/my.cnf
 COPY supervisord.conf /etc/supervisor/supervisord.conf
